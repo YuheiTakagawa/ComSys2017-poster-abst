@@ -1,0 +1,133 @@
+\documentclass{ipsjpapers}
+\usepackage[dvipdfmx]{graphicx}
+\usepackage{comsys-poster}
+\usepackage{multirow}
+\usepackage{url}
+\title{異種OS混在環境におけるコンテナ型仮想化実行環境の\\ライブマイグレーションの実現}
+
+\author{高川 雄平　松原 克弥}
+
+\begin{document}
+\maketitle
+\section{はじめに}
+近年，クラウドコンピューティングの基盤技術の一つであるコンテナ型仮想化が注目されてい
+る\cite{focus-container}．コンテナ型仮想化は，OSが提供する資源を分離・制限し，単一動作
+のOS上に複数の独立した実行環境を構築できる軽量な仮想化を実現する．\\
+　また，クラウドコンピューティング実動環境では，負荷分散や可用性の実現を目的にライブマイグ
+レーションが活用される．ライブマイグレーションとは，実行中のサービスを仮想マシンごと動的に
+別のマシンに移動させる技術である．コンテナ型仮想化におけるライブマイグレーションは，Linux
+ではCRIU (Checkpoint/Restore in Userspace)\cite{criu}，FreeBSDではFreeBSD VPS (Virtual Private System)\cite{freebsd-vps}
+が実現している．しかし，コンテナ型仮想化の実装はOS依存のため，異種OS混在環境間でのコンテ
+ナ型仮想化のライブマイグレーションは実現されていない．同一OS間だけのライブマイグレーション
+では，システム全体の計算資源を活用することができず，メンテナンス時の可用性が損なわれてしま
+う．\\
+　本稿では，稼働OSに依存したシステム運用で起きる前述の問題に対処するために，OS
+混在環境におけるコンテナ型仮想化実行環境のライブマイグレーションの実現を目的とする．
+
+\section{異種OS間ライブマイグレーション実現方式}
+本章では，異種OS間でのコンテナ型仮想化におけるライブマイグレーションの実現方式を提案
+する．本研究では，LinuxとFreeBSDを対象とする．\\
+　コンテナ型仮想化実行環境のマイグレーションのためには，プロセス実行状態のマイグレーシ
+ョン(プロセス・マイグレーション)とプロセス隔離状態のマイグレーション(コンテナ・マイグレー
+ション)が必要になる．それぞれにおける技術的課題と解決方法を以下に述べる．
+
+\subsection{プロセス・マイグレーション}
+プロセス・マイグレーションには以下の2点の課題を解決する必要がある．
+\begin{table}[t]
+
+  \label{tb:syscall}
+  \caption{openシステムコールにおけるOSの差異}
+  \vspace{0.5em}
+  \begin{center}
+    \begin{tabular}{|c|c|c|} \hline
+       & Linux & FreeBSD  \\ \hline \hline
+      \shortstack{open()の\\システムコール番号} & 2 & 5 \\ \hline
+      \shortstack{open()の\\引数オプション\\O\_CREAT} & 0x0200 & 0x0040 \\ \hline
+      引数の渡し方 & レジスタ経由 & スタック経由  \\ \hline
+    \end{tabular}
+  \end{center}
+\end{table}
+
+\subsubsection{システムコールに関する差異}
+LinuxとFreeBSDでは，システムコールの実装は大半が同じである．しかし，システムコール番号や引数パラメータ，引数の渡し方が異なるため，Linux実行バイナリとFreeBSD実行バイナリは各OS上での
+みしか動作しない．表\ref{tb:syscall}には，openシステムコールにおける差異を示している
+．openシステムコール番号は，Linuxでは2，FreeBSDでは5となっている．openシステムコールでファ
+イルを作るときのパラメータとして渡すO\_CREATは，Linuxでは0x0200，FreeBSDでは0x0040となって
+いる．システムコールの引数を，Linuxではレジスタ経由，FreeBSDではスタック経由で渡す
+．以上のようなシステムコールに関する差異があるため，メモリの状態やレジスタの状態が異なる
+．\\
+　システムコール番号，引数パラメータの変換を行い，引数の渡し方を互換することで解決すること
+ができる．FreeBSDにはLinuxバイナリ互換機能\cite{linux-emu}というカーネル機能があり，上述の変換と互換
+を行う．この機能によって，Linuxバイナリであれば，Linux
+とFreeBSDで実行ファイルを一切変更せずに動作させることができる．本稿では，システムコール
+の差異をLinuxバイナリ互換機能を用いることで解決する．
+
+\subsubsection{メモリレイアウトに関する差異}
+メモリレイアウトは仮想メモリ空間における領域の配置である．一般的にASLR (Address Space
+Layout Randomization)によって，領域はランダムに配置される．また，ASLRを
+無効化して領域を固定した場合でも，LinuxとFreeBSDではヒープ領域・スタック領域・共有ライブラリの配置に誤差がある．この誤差を純粋に修正する場合には，スタック内にある全てのベースアドレス，リターンアドレス，共有ライブラリ内の命令を示すオフセット，ヒープ領域の変数を参照するオフセットなどを見つけ出し配置の誤差だけ移動する必要がある．\\
+　毎回全ての領域に対して，メモリ内部の探索と移動を行うのはオーバーヘッドが大きい．本稿では，メモリレイアウト変更機能を利用し，マイグレーション元とマイグレーション先のメモリレイアウトを同じレイアウトに設定することで，メモリ内部を変更することなく解決する．同じレイアウトにすることができるため，ASLRのランダムなメモリレイアウトも再現可能である．\\
+　Linuxでは，prctlシステムコール機能を利用することでメモリレイアウトをユーザプログラムから変更可能である．しかし，FreeBSDにはメモリレイアウトをユーザプログラムから変更できる機能はないため，実装する必要がある．
+
+\subsection{コンテナマイグレーション}
+\label{sec:CM}
+LinuxとFreeBSDではコンテナを実現する機能が異な
+り，隔離・制限する対象や名称，値が異なるため，そのまま復元することはできない．資源制限は，Linuxではcgroupsを用い，FreeBSDでは主にRCTLを用いることで実現される．資源隔離は，LinuxではNamespaceを用い，FreeBSDではJailを用いることで実現される．
+
+\begin{table}[t]
+  \caption{プロセス制限機能対応}
+  \label{tb:limit}
+  \vspace{0.5em}
+  \begin{center}
+  \begin{tabular}{|c|c|c|} \hline
+    制限機能 & Linux & FreeBSD \\ \hline \hline
+    CPUリソース & \multirow{5}{*}{cgroups} &  RCTL+cpuset(1) \\ \cline{1-1} \cline{3-3}
+    メモリリソース &  &  \multirow{2}{*}{RCTL} \\ \cline{1-1}
+    ファイル入出力 &  &  \\ \cline{1-1} \cline{3-3}
+    デバイスアクセス &  & devfs(8) \\ \cline{1-1} \cline{3-3}
+    一時停止/再開 &  & △ SIGSTOP \\ \hline
+  \end{tabular}
+\end{center}
+\end{table}
+
+\begin{table}[t]
+\vspace{-2em}
+  \caption{プロセス隔離機能対応}
+  \label{tb:isolation}
+  \vspace{0.5em}
+  \begin{center}
+  \begin{tabular}{|c|c|c|} \hline
+    隔離機能 & Linux & FreeBSD \\ \hline \hline
+    プロセス間通信 & \multirow{6}{*}{Namespace} &  \multirow{5}{*}{Jail} \\ \cline{1-1}
+    マウントポイント &  & \\ \cline{1-1}
+    ユーザID &  &  \\ \cline{1-1}
+    ホスト名 &  & \\ \cline{1-1}
+    ネットワーク &  & \\ \cline{1-1} \cline{3-3}
+    プロセスID &  & △ Jail \\ \hline
+  \end{tabular}
+\end{center}
+\end{table}
+資源の隔離・制限機能に関しては，機能の対応付けや数値の変換を行い，それぞれの機能
+で隔離・制限状態を再現することで解決する．資源の制限は，Linux cgroupsとFreeBSD RCTLの制限状態の対応付けと相互変換(表\ref{tb:limit}参照)を行うことで再現する．例え
+ば，CPU使用率を50\%に制限するのであれば，Linux上ではcgroupsに以下のように設定する．\\\\
+\verb|cpu.cfs_quota=50|\\
+\verb|cpu.cfs_period_us=100|\\\\
+FreeBSD上では，RCTLに以下を設定することで同様の制限を実現できる．\\\\
+\verb|jail:<jail id>:pcpu:deny=50|\\\\
+プロセスがアクセス可能な資源の隔離は，プロセスID空間の隔離を除いて，Linux NamespaceとFreeBSD Jailで同様の実現が可能である(表\ref{tb:isolation}参照)．プロセスID空間の隔離機能の違いは，すべてのコンテナに含まれるプロセスに対して，システム内で重複しない一意なIDを付与することで対処する．
+
+\section{まとめ}
+本稿では，異種OS混在環境におけるコンテナ型仮想化のライブマイグレーションを実現するための提案と検討を行った．対象OSをLinuxとFreeBSDとし，プロセス・マイグレーションにおけるシステムコールに関する差異はLinuxバイナリ互換機能を用い，メモリレイアウトに関する差異は同じメモリレイアウト機能を用いて吸収する．コンテナ・マイグレーションにおける実装機能の差異に関しては，それぞれの機能の対応付けと変換を行うことで差異を吸収する．\\
+　今後の課題として，ネットワークソケットやファイルポインタなどのカーネル等プロセス外で管理されているプロセス関連情報を対象プロセスのマイグレーションに含める技術の実現がある．
+\begin{thebibliography}{99}
+
+  \bibitem{focus-container}
+  	451 Research, "451 Research: Application containers will be a \$2.7bn market by 2020", 2017.
+  \bibitem{criu}
+  	CRIU Project: CRIU Main page, \url{https://criu.org/}, 2010 (accessed November 1 2017).
+  \bibitem{freebsd-vps}
+  Klaus P. Ohrhallinger: Virtual Private System for FreeBSD, \url{http://www.7he.at/freebsd/vps/}, 2010 (accessed November 6, 2017). EuroBSDCon 2010.
+  \bibitem{linux-emu}
+  Jim Mock: Linux Binary Compatibility, https://www.freebsd.org\slash{}doc\slash{}handbook\slash{}\\linuxemu.html, 1999 (accessed November 2, 2017).
+\end{thebibliography}
+\end{document}
